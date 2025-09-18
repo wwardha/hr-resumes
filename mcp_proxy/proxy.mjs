@@ -186,9 +186,14 @@ async function connectClient() {
     const sseUrl = (() => {
       try {
         const u = new URL(remoteUrl);
-        if (!u.pathname.endsWith("/sse")) {
-          const trimmedPath = u.pathname.endsWith("/") ? u.pathname.slice(0, -1) : u.pathname;
-          u.pathname = `${trimmedPath}/sse`;
+        if (u.pathname.endsWith("/sse")) {
+          // already a full SSE URL
+        } else if (u.pathname.endsWith("/mcp")) {
+          u.pathname = `${u.pathname}/sse`;
+        } else if (u.pathname.endsWith("/mcp/")) {
+          u.pathname = `${u.pathname}sse`;
+        } else {
+          u.pathname = `${u.pathname.replace(/\/$/, "")}/mcp/sse`;
         }
         return u;
       } catch (e) {
