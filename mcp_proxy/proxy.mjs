@@ -28,6 +28,12 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import EventSource from "eventsource";
+
+// Polyfill EventSource for Node.js so the SDK's SSE transport works.
+if (!globalThis.EventSource) {
+  globalThis.EventSource = EventSource;
+}
 
 const REMOTE_URL = process.env.MCP_REMOTE_URL;
 const MCP_TOKEN = process.env.MCP_TOKEN;

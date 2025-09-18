@@ -8,7 +8,7 @@
     "hr-resumes-mcp-proxy": "proxy.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^0.6.0"
+    "@modelcontextprotocol/sdk": "^0.6.0",
+    "eventsource": "^2.0.2"
   }
 }
-
