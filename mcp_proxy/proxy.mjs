@@ -175,8 +175,8 @@ async function main() {
 
   const server = new Server(
     { name: "hr-resumes-stdio-proxy", version: "1.0.0" },
-    // Mirror remote capabilities where reasonable; ensure tools are enabled
-    { capabilities: { tools: {} } }
+    // Advertise tools/resources/prompts so we can register handlers below
+    { capabilities: { tools: {}, resources: {}, prompts: {} } }
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
