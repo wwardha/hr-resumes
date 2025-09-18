@@ -67,7 +67,21 @@ class SSEAuthClientTransport {
       this._es.addEventListener("endpoint", (event) => {
         try {
           const data = event?.data;
-          this._endpoint = new URL(data, this._url);
+          // Handle both absolute and relative endpoint URLs properly
+          if (data.startsWith('http://') || data.startsWith('https://')) {
+            // Absolute URL - use as is
+            this._endpoint = new URL(data);
+          } else if (data.startsWith('/')) {
+            // Absolute path - use origin from base URL
+            this._endpoint = new URL(data, this._url.origin);
+          } else {
+            // Relative path - append to base URL directory
+            const baseUrl = new URL(this._url);
+            // Remove the last path segment and append the new path
+            const basePath = baseUrl.pathname.endsWith('/') ? baseUrl.pathname : baseUrl.pathname + '/';
+            this._endpoint = new URL(basePath + data, this._url.origin);
+          }
+          
           if (this._endpoint.origin !== this._url.origin) {
             throw new Error(`Endpoint origin mismatch: ${this._endpoint.origin}`);
           }
