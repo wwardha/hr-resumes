@@ -39,7 +39,12 @@ import {
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import EventSource from "eventsource";
+
+// Node's built-in EventSource lacks header support; use the package version.
+if (!globalThis.EventSource) {
+  globalThis.EventSource = EventSource;
+}
 
 function headersFromEnv() {
   const headers = {};
@@ -78,6 +83,81 @@ if (argvUrl && argvUrl !== remoteUrl) {
 const client = new Client({ name: "hr-resumes-proxy-client", version: "1.1.0" });
 const headers = headersFromEnv();
 
+class SSEAuthClientTransport {
+  constructor(url, opts = {}) {
+    this._url = new URL(url);
+    this._headers = opts.headers || {};
+    this.onclose = undefined;
+    this.onerror = undefined;
+    this.onmessage = undefined;
+  }
+
+  start() {
+    if (this._es) throw new Error("SSE transport already started");
+    return new Promise((resolve, reject) => {
+      this._ac = new AbortController();
+      this._es = new EventSource(this._url.href, { headers: this._headers });
+      this._es.onerror = (event) => {
+        // eventsource package surfaces numeric status via `status` or `code`
+        const code = event?.status ?? event?.code;
+        const message = event?.message ?? "SSE error";
+        const err = Object.assign(new Error(message), { code });
+        reject(err);
+        this.onerror?.(err);
+      };
+      this._es.addEventListener("endpoint", (event) => {
+        try {
+          const data = event?.data;
+          if (!data) throw new Error("Missing endpoint event payload");
+          // Handle absolute URLs and relative paths emitted by FastMCP.
+          if (data.startsWith("http://") || data.startsWith("https://")) {
+            this._endpoint = new URL(data);
+          } else {
+            this._endpoint = new URL(data, this._url);
+          }
+          if (this._endpoint.origin !== this._url.origin) {
+            throw new Error(`Endpoint origin mismatch: ${this._endpoint.origin}`);
+          }
+        } catch (err) {
+          reject(err);
+          this.onerror?.(err);
+          void this.close();
+          return;
+        }
+        resolve();
+      });
+      this._es.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          this.onmessage?.(msg);
+        } catch (err) {
+          this.onerror?.(err);
+        }
+      };
+    });
+  }
+
+  async close() {
+    this._ac?.abort();
+    this._es?.close();
+    this.onclose?.();
+  }
+
+  async send(message) {
+    if (!this._endpoint) throw new Error("SSE transport not ready");
+    const res = await fetch(this._endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...this._headers },
+      body: JSON.stringify(message),
+      signal: this._ac?.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`POST ${this._endpoint} failed (${res.status}): ${text}`);
+    }
+  }
+}
+
 async function connectClient() {
   try {
     const shttp = new StreamableHTTPClientTransport(new URL(remoteUrl), { headers });
@@ -85,7 +165,7 @@ async function connectClient() {
     console.error(`[proxy] Connected to ${remoteUrl} via Streamable HTTP`);
   } catch (err) {
     console.error("[proxy] Streamable HTTP failed, falling back to SSE:", err?.message || err);
-    const sse = new SSEClientTransport(new URL(remoteUrl), { headers });
+    const sse = new SSEAuthClientTransport(remoteUrl, { headers });
     await client.connect(sse);
     console.error(`[proxy] Connected to ${remoteUrl} via SSE`);
   }
