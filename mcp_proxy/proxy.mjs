@@ -98,12 +98,17 @@ class SSEAuthClientTransport {
       this._ac = new AbortController();
       this._es = new EventSource(this._url.href, { headers: this._headers });
       this._es.onerror = (event) => {
-        // eventsource package surfaces numeric status via `status` or `code`
-        const code = event?.status ?? event?.code;
-        const message = event?.message ?? "SSE error";
-        const err = Object.assign(new Error(message), { code });
+        const status = event?.status ?? event?.code;
+        const err = new Error(
+          status ? `SSE error: status ${status}` : event?.message || "SSE error"
+        );
+        if (typeof status === "number") {
+          err.code = status;
+        }
+        // Resolve with failure so outer connect() can decide how to handle auth errors.
         reject(err);
         this.onerror?.(err);
+        void this.close();
       };
       this._es.addEventListener("endpoint", (event) => {
         try {
@@ -165,6 +170,7 @@ async function connectClient() {
     console.error(`[proxy] Connected to ${remoteUrl} via Streamable HTTP`);
   } catch (err) {
     console.error("[proxy] Streamable HTTP failed, falling back to SSE:", err?.message || err);
+    console.error("[proxy] Falling back to SSE with headers:", Object.fromEntries(Object.entries(headers || {})));
     const sse = new SSEAuthClientTransport(remoteUrl, { headers });
     await client.connect(sse);
     console.error(`[proxy] Connected to ${remoteUrl} via SSE`);
