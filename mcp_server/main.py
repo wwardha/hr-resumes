@@ -12,14 +12,36 @@ try:
     import importlib.util as _iu
     if _iu.find_spec("mcp.server") and _iu.find_spec("mcp.server.sse"):
         from .tools import server  # FastMCP instance with tools registered
-        # Mount FastMCP's Starlette app that serves `/mcp/sse` and `/mcp/messages/`
-        # using the SDK's SSE transport. Mount at root; app itself is configured
-        # with mount_path "/mcp" so routes resolve to /mcp/sse etc.
-        inner.mount("/mcp", server.sse_app(mount_path="/mcp"))
+
+        http_enabled = False
+        http_app = None
+        if hasattr(server, "http_app"):
+            try:
+                http_app = server.http_app(mount_path="/mcp")
+                http_enabled = True
+                logging.info("FastMCP Streamable HTTP transport available")
+            except Exception as http_err:
+                logging.warning("FastMCP HTTP app unavailable: %s", http_err)
+
+        sse_app = server.sse_app(mount_path="/mcp")
+
+        if http_enabled and http_app is not None:
+            inner.mount("/mcp", http_app)
+            if hasattr(http_app, "mount"):
+                try:
+                    http_app.mount("/sse", sse_app)
+                    logging.info("Mounted SSE fallback beneath HTTP app")
+                except Exception as mount_err:
+                    logging.warning("Failed to mount SSE fallback under HTTP app: %s", mount_err)
+            else:
+                logging.warning("HTTP app does not support .mount; SSE fallback unavailable")
+        else:
+            inner.mount("/mcp", sse_app)
+            logging.info("Mounted FastMCP SSE app at /mcp")
 
         @inner.get("/mcp/health")
         async def mcp_health():
-            return {"ok": True}
+            return {"ok": True, "http": http_enabled}
     else:
         raise ImportError("mcp.server.sse not found")
 except Exception as e:
