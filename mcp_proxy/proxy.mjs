@@ -108,7 +108,7 @@ class SSEAuthClientTransport {
           return;
         }
         this.onmessage?.(msg);
-      });
+      };
     });
   }
 
