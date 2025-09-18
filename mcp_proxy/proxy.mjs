@@ -171,21 +171,14 @@ async function main() {
     { capabilities: { tools: {} } }
   );
 
-  // Register each remote tool locally and forward calls
-  for (const t of tools.tools || []) {
-    const name = t.name;
-    const description = t.description || "(proxied tool)";
-    const inputSchema = t.inputSchema || { type: "object" };
-
-    server.tool(
-      { name, description, inputSchema },
-      async (args) => {
-        const result = await client.callTool(name, args ?? {});
-        // result.content is already in MCP message format
-        return result.content;
-      }
-    );
-  }
+  server.setRequestHandler("tools/list", async () => {
+    return await client.listTools();
+  });
+  server.setRequestHandler("tools/call", async (req) => {
+    const { name, arguments: args } = req.params || {};
+    if (!name) throw new Error("tools/call missing 'name' parameter");
+    return await client.callTool(name, args ?? {});
+  });
 
   // Optional: light bridging for resources/prompts; errors will bubble if unsupported by remote
   server.setRequestHandler("resources/list", async () => {
