@@ -114,11 +114,23 @@ class SSEAuthClientTransport {
         try {
           const data = event?.data;
           if (!data) throw new Error("Missing endpoint event payload");
-          // Handle absolute URLs and relative paths emitted by FastMCP.
           if (data.startsWith("http://") || data.startsWith("https://")) {
             this._endpoint = new URL(data);
+          } else if (data.startsWith("/")) {
+            this._endpoint = new URL(data, this._url.origin);
           } else {
-            this._endpoint = new URL(data, this._url);
+            const base = new URL(this._url);
+            const lastSlash = base.pathname.lastIndexOf("/");
+            const dirPath = lastSlash >= 0 ? base.pathname.slice(0, lastSlash + 1) : "/";
+            let rel = data;
+            if (dirPath.endsWith("/mcp/") && rel.startsWith("mcp/")) {
+              rel = rel.slice(4);
+            }
+            this._endpoint = new URL(dirPath + rel, this._url.origin);
+          }
+          if (this._endpoint.pathname.includes("/mcp/mcp/")) {
+            const normalized = this._endpoint.pathname.replace("/mcp/mcp/", "/mcp/");
+            this._endpoint = new URL(`${this._endpoint.origin}${normalized}${this._endpoint.search}`);
           }
           if (this._endpoint.origin !== this._url.origin) {
             throw new Error(`Endpoint origin mismatch: ${this._endpoint.origin}`);
