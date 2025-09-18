@@ -87,6 +87,12 @@ class SSEAuthClientTransport {
             }
             this._endpoint = new URL(dirPath + rel, this._url.origin);
           }
+          // Normalize accidental double segments like '/mcp/mcp/' if any
+          if (this._endpoint.pathname.includes('/mcp/mcp/')) {
+            const normalized = this._endpoint.pathname.replace('/mcp/mcp/', '/mcp/');
+            this._endpoint = new URL(`${this._endpoint.origin}${normalized}${this._endpoint.search}`);
+          }
+          console.error(`[proxy] endpoint event: data="${data}", resolved_endpoint="${this._endpoint.href}"`);
           
           if (this._endpoint.origin !== this._url.origin) {
             throw new Error(`Endpoint origin mismatch: ${this._endpoint.origin}`);
@@ -120,6 +126,7 @@ class SSEAuthClientTransport {
 
   async send(message) {
     if (!this._endpoint) throw new Error("Not connected");
+    console.error(`[proxy] sending to ${this._endpoint.href}`);
     const res = await fetch(this._endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...this._headers },
