@@ -78,7 +78,7 @@ Note: In config mode, ensure DNS CNAMEs exist for your hostnames pointing to the
 If your Claude Desktop build does not support HTTP/SSE MCP configs (shows error about `command: Required`), use the included stdio proxy:
 
 1) Ensure Node.js 18+ is installed on your desktop.
-2) Use this Claude Desktop config (Windows example) to launch the proxy as a `command`:
+2) Use this Claude Desktop config (Windows example) to launch the proxy as a `command` (the proxy will prefer `/mcp` Streamable HTTP and fall back to SSE automatically):
 
 ```
 {
@@ -87,8 +87,8 @@ If your Claude Desktop build does not support HTTP/SSE MCP configs (shows error 
       "command": "node",
       "args": ["C:\\path\\to\\repo\\hr-resumes\\mcp_proxy\\proxy.mjs"],
       "env": {
-        "MCP_REMOTE_URL": "https://hr-resumes-mcp.<your-domain>/mcp/sse",
-        "MCP_TOKEN": "<your-mcp-token>"
+        "MCP_REMOTE_URL": "https://hr-resumes-mcp.<your-domain>/mcp",
+        "MCP_REMOTE_BEARER": "<your-mcp-token>"
       }
     }
   }
