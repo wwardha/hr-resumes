@@ -1,5 +1,10 @@
-from mcp.server import Server
-from mcp.logging import setup_logging
+from mcp.server import FastMCP as Server
+try:
+    # Older/newer SDKs may not ship mcp.logging; guard import.
+    from mcp.logging import setup_logging  # type: ignore
+except Exception:  # pragma: no cover
+    def setup_logging():
+        pass
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 import httpx, os
@@ -52,11 +57,6 @@ class RegisterGenMcpToolReq(BaseModel):
         "Generate or modify the separate FastAPI app (port 9000) from a natural-language brief. "
         "Writes files under /workspace/generated_api, installs packages if needed, and hot-reloads."
     ),
-    inputSchema={
-        "type": "object",
-        "properties": {"brief": {"type": "string"}},
-        "required": ["brief"],
-    },
 )
 async def build_from_brief(brief: str):
     async with httpx.AsyncClient(timeout=600) as client:
@@ -71,15 +71,6 @@ async def build_from_brief(brief: str):
 @server.tool(
     name="apply_files_to_generated_api",
     description="Write/overwrite specific files in the generated API; optional pip install.",
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "files": {"type": "object"},
-            "install": {"type": "boolean", "default": False},
-            "packages": {"type": "array", "items": {"type": "string"}},
-        },
-        "required": ["files"],
-    },
 )
 async def apply_files_to_generated_api(
     files: Dict[str, str], install: bool = False, packages: Optional[List[str]] = None
@@ -95,11 +86,6 @@ async def apply_files_to_generated_api(
 @server.tool(
     name="pip_install_in_container",
     description="Install extra Python packages inside the container.",
-    inputSchema={
-        "type": "object",
-        "properties": {"packages": {"type": "array", "items": {"type": "string"}}},
-        "required": ["packages"],
-    },
 )
 async def pip_install_in_container(packages: List[str]):
     async with httpx.AsyncClient(timeout=1200) as client:
@@ -114,11 +100,6 @@ async def pip_install_in_container(packages: List[str]):
 @server.tool(
     name="run_allowed_command",
     description="Run an allow-listed shell command (e.g., alembic upgrade head).",
-    inputSchema={
-        "type": "object",
-        "properties": {"cmd": {"type": "string"}},
-        "required": ["cmd"],
-    },
 )
 async def run_allowed_command(cmd: str):
     async with httpx.AsyncClient(timeout=1200) as client:
@@ -133,18 +114,6 @@ async def run_allowed_command(cmd: str):
 @server.tool(
     name="register_mcp_tool_in_generated_api",
     description="Register a new MCP tool in the Generated API and trigger hot-reload.",
-    inputSchema={
-        "type": "object",
-        "properties": {
-            "name": {"type": "string"},
-            "description": {"type": "string"},
-            "inputSchema": {"type": "object"},
-            "backend": {"type": "string", "enum": ["static", "claude"]},
-            "static": {"type": "object"},
-            "claude": {"type": "object"},
-        },
-        "required": ["name", "description", "inputSchema", "backend"],
-    },
 )
 async def register_mcp_tool_in_generated_api(
     name: str,

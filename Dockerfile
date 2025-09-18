@@ -29,8 +29,7 @@ RUN if [ "$INSTALL_NODE_NANO" = "true" ]; then \
 # Python deps
 COPY requirements.txt ./requirements.txt
 RUN pip install --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir "mcp[fastapi] @ git+https://github.com/modelcontextprotocol/python-sdk@v1.1.0"
+    && pip install --no-cache-dir -r requirements.txt
 
 # Project files
 COPY mcp_server ./mcp_server

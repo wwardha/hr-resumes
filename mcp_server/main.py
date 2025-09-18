@@ -1,28 +1,29 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from starlette.responses import Response
 import logging
 from .auth_asgi import MCPAuthASGI
 from .minimal_mcp_router import create_minimal_mcp_router as _create_minimal
 
-# Optional MCP integration: import only if available
-create_fastapi_router = None
-server = None
-try:
-    import importlib.util as _iu
-    if _iu.find_spec("mcp.server.fastapi") and _iu.find_spec("mcp.server"):
-        from mcp.server.fastapi import create_fastapi_router  # type: ignore
-        from .tools import server  # type: ignore
-    else:
-        raise ImportError("mcp.server not found")
-except Exception as e:
-    logging.warning("MCP FastAPI adapter unavailable; /mcp routes disabled: %s", e)
-
-
 logging.basicConfig(level=logging.INFO)
 inner = FastAPI(title="Living FastAPI - MCP Server")
-# Prefer real adapter if present; otherwise use minimal stub
-if create_fastapi_router is not None and server is not None:
-    inner.include_router(create_fastapi_router(server), prefix="/mcp")
-else:
+
+# Try to expose real MCP SSE routes using the SDK available in newer versions
+try:
+    import importlib.util as _iu
+    if _iu.find_spec("mcp.server") and _iu.find_spec("mcp.server.sse"):
+        from .tools import server  # FastMCP instance with tools registered
+        # Mount FastMCP's Starlette app that serves `/mcp/sse` and `/mcp/messages/`
+        # using the SDK's SSE transport. Mount at root; app itself is configured
+        # with mount_path "/mcp" so routes resolve to /mcp/sse etc.
+        inner.mount("/mcp", server.sse_app(mount_path="/mcp"))
+
+        @inner.get("/mcp/health")
+        async def mcp_health():
+            return {"ok": True}
+    else:
+        raise ImportError("mcp.server.sse not found")
+except Exception as e:
+    logging.warning("MCP SSE adapter unavailable; using minimal /mcp stub: %s", e)
     inner.include_router(_create_minimal(None), prefix="/mcp")
 
 
