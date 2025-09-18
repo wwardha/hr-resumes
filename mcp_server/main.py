@@ -26,22 +26,24 @@ try:
         sse_app = server.sse_app(mount_path="/mcp")
 
         if http_enabled and http_app is not None:
-            inner.mount("/mcp", http_app)
-            if hasattr(http_app, "mount"):
-                try:
-                    http_app.mount("/sse", sse_app)
-                    logging.info("Mounted SSE fallback beneath HTTP app")
-                except Exception as mount_err:
-                    logging.warning("Failed to mount SSE fallback under HTTP app: %s", mount_err)
-            else:
-                logging.warning("HTTP app does not support .mount; SSE fallback unavailable")
-        else:
-            inner.mount("/mcp", sse_app)
-            logging.info("Mounted FastMCP SSE app at /mcp")
+            mcp_app = FastAPI(title="MCP Multiplexer")
 
-        @inner.get("/mcp/health")
-        async def mcp_health():
-            return {"ok": True, "http": http_enabled}
+            @mcp_app.get("/health")
+            async def mcp_http_health():
+                return {"ok": True, "http": True}
+
+            mcp_app.mount("/", http_app)
+            mcp_app.mount("/sse", sse_app)
+            inner.mount("/mcp", mcp_app)
+        else:
+            mcp_app = FastAPI(title="MCP SSE Adapter")
+
+            @mcp_app.get("/health")
+            async def mcp_sse_health():
+                return {"ok": True, "http": False}
+
+            mcp_app.mount("/", sse_app)
+            inner.mount("/mcp", mcp_app)
     else:
         raise ImportError("mcp.server.sse not found")
 except Exception as e:
