@@ -28,25 +28,36 @@ try:
 
         sse_app = server.sse_app()
 
+        class MCPMux:
+            def __init__(self, http_app, sse_app):
+                self._http_app = http_app
+                self._sse_app = sse_app
+
+            async def __call__(self, scope, receive, send):
+                target = self._http_app
+                routed_scope = scope
+                if scope.get("type") in {"http", "websocket"}:
+                    suffix = scope.get("path", "") or ""
+                    routed_scope = dict(scope)
+                    if suffix in ("", "/"):
+                        routed_scope["path"] = "/mcp"
+                        target = self._http_app
+                    elif suffix.startswith("/sse") or suffix.startswith("/messages"):
+                        routed_scope["path"] = suffix
+                        target = self._sse_app
+                    else:
+                        routed_scope["path"] = "/mcp" + suffix
+                        target = self._http_app
+                await target(routed_scope, receive, send)
+
         if http_enabled and http_app is not None:
-            mcp_app = FastAPI(title="MCP Multiplexer")
-
-            @mcp_app.get("/health")
-            async def mcp_http_health():
-                return {"ok": True, "http": True}
-
-            mcp_app.mount("/", http_app)
-            mcp_app.mount("/sse", sse_app)
-            inner.mount("/mcp", mcp_app)
+            inner.mount("/mcp", MCPMux(http_app, sse_app))
         else:
-            mcp_app = FastAPI(title="MCP SSE Adapter")
+            inner.mount("/mcp", sse_app)
 
-            @mcp_app.get("/health")
-            async def mcp_sse_health():
-                return {"ok": True, "http": False}
-
-            mcp_app.mount("/", sse_app)
-            inner.mount("/mcp", mcp_app)
+        @inner.get("/mcp/health")
+        async def mcp_health():
+            return {"ok": True, "http": http_enabled}
     else:
         raise ImportError("mcp.server.sse not found")
 except Exception as e:

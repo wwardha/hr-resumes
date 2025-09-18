@@ -178,9 +178,14 @@ class SSEAuthClientTransport {
 
 async function connectClient() {
   try {
-    const shttp = new StreamableHTTPClientTransport(new URL(remoteUrl), { requestInit: { headers } });
+    // Ensure URL has trailing slash for HTTP transport to prevent 307 redirects
+    const httpUrl = new URL(remoteUrl);
+    if (!httpUrl.pathname.endsWith('/')) {
+      httpUrl.pathname += '/';
+    }
+    const shttp = new StreamableHTTPClientTransport(httpUrl, { requestInit: { headers } });
     await client.connect(shttp);
-    console.error(`[proxy] Connected to ${remoteUrl} via Streamable HTTP`);
+    console.error(`[proxy] Connected to ${httpUrl} via Streamable HTTP`);
   } catch (err) {
     console.error("[proxy] Streamable HTTP failed, falling back to SSE:", err?.message || err);
     console.error("[proxy] Falling back to SSE with headers:", Object.fromEntries(Object.entries(headers || {})));
