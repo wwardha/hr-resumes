@@ -85,7 +85,7 @@ const headers = headersFromEnv();
 
 class SSEAuthClientTransport {
   constructor(url, opts = {}) {
-    this._url = new URL(url);
+    this._url = typeof url === "string" ? new URL(url) : new URL(url.href);
     this._headers = opts.headers || {};
     this.onclose = undefined;
     this.onerror = undefined;
@@ -171,9 +171,22 @@ async function connectClient() {
   } catch (err) {
     console.error("[proxy] Streamable HTTP failed, falling back to SSE:", err?.message || err);
     console.error("[proxy] Falling back to SSE with headers:", Object.fromEntries(Object.entries(headers || {})));
-    const sse = new SSEAuthClientTransport(remoteUrl, { headers });
+    const sseUrl = (() => {
+      try {
+        const u = new URL(remoteUrl);
+        if (!u.pathname.endsWith("/sse")) {
+          const trimmedPath = u.pathname.endsWith("/") ? u.pathname.slice(0, -1) : u.pathname;
+          u.pathname = `${trimmedPath}/sse`;
+        }
+        return u;
+      } catch (e) {
+        console.error("[proxy] Failed to derive SSE URL from", remoteUrl, e);
+        return remoteUrl;
+      }
+    })();
+    const sse = new SSEAuthClientTransport(sseUrl, { headers });
     await client.connect(sse);
-    console.error(`[proxy] Connected to ${remoteUrl} via SSE`);
+    console.error(`[proxy] Connected to ${sseUrl} via SSE`);
   }
 }
 
