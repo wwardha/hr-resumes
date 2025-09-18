@@ -18,6 +18,13 @@ class MCPAuthASGI:
         typ = scope.get("type", "")
         if path.startswith("/mcp"):
             headers = {k.decode().lower(): v.decode() for k, v in scope.get("headers", [])}
+            redacted_headers = {}
+            for key, value in headers.items():
+                if any(sensitive in key for sensitive in ("authorization", "token", "secret")):
+                    redacted_headers[key] = (value[:4] + "***") if value else "<empty>"
+                else:
+                    redacted_headers[key] = value
+            logging.info("Incoming /mcp request headers: %s", redacted_headers)
             supplied = headers.get("authorization", "").removeprefix("Bearer ").strip() \
                 or headers.get("x-mcp-token", "")
             if not self.token or supplied != self.token:

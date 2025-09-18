@@ -178,7 +178,7 @@ class SSEAuthClientTransport {
 
 async function connectClient() {
   try {
-    const shttp = new StreamableHTTPClientTransport(new URL(remoteUrl), { headers });
+    const shttp = new StreamableHTTPClientTransport(new URL(remoteUrl), { requestInit: { headers } });
     await client.connect(shttp);
     console.error(`[proxy] Connected to ${remoteUrl} via Streamable HTTP`);
   } catch (err) {
