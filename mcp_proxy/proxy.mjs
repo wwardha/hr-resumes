@@ -75,11 +75,17 @@ class SSEAuthClientTransport {
             // Absolute path - use origin from base URL
             this._endpoint = new URL(data, this._url.origin);
           } else {
-            // Relative path - append to base URL directory
-            const baseUrl = new URL(this._url);
-            // Remove the last path segment and append the new path
-            const basePath = baseUrl.pathname.endsWith('/') ? baseUrl.pathname : baseUrl.pathname + '/';
-            this._endpoint = new URL(basePath + data, this._url.origin);
+            // Relative path - resolve against parent directory of base URL
+            const base = new URL(this._url);
+            // Compute directory of base path (drop last segment like 'sse')
+            const lastSlash = base.pathname.lastIndexOf('/');
+            const dirPath = lastSlash >= 0 ? base.pathname.slice(0, lastSlash + 1) : '/';
+            let rel = data;
+            // If server returns 'mcp/...' and dirPath already ends with '/mcp/', avoid duplicating
+            if (dirPath.endsWith('/mcp/') && rel.startsWith('mcp/')) {
+              rel = rel.slice(4);
+            }
+            this._endpoint = new URL(dirPath + rel, this._url.origin);
           }
           
           if (this._endpoint.origin !== this._url.origin) {
@@ -102,7 +108,7 @@ class SSEAuthClientTransport {
           return;
         }
         this.onmessage?.(msg);
-      };
+      });
     });
   }
 
