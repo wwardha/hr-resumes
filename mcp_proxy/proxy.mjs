@@ -59,10 +59,20 @@ function headersFromEnv() {
   return headers;
 }
 
-const remoteUrl = process.env.MCP_REMOTE_URL || process.argv[2];
+const argvUrl = process.argv
+  .slice(2)
+  .find((arg) => typeof arg === "string" && arg.length && !arg.startsWith("-"));
+
+const remoteUrl = process.env.MCP_REMOTE_URL || argvUrl;
 if (!remoteUrl) {
-  console.error("MCP_REMOTE_URL is required (e.g. https://host/mcp)");
+  console.error(
+    "MCP_REMOTE_URL is required (e.g. https://host/mcp). Set it via env or pass as the first non-flag argument."
+  );
   process.exit(1);
+}
+
+if (argvUrl && argvUrl !== remoteUrl) {
+  console.error(`[proxy] Ignoring CLI flag; using MCP_REMOTE_URL from env: ${remoteUrl}`);
 }
 
 const client = new Client({ name: "hr-resumes-proxy-client", version: "1.1.0" });
