@@ -21,6 +21,12 @@ try:
                 http_app = server.streamable_http_app()
                 http_enabled = True
                 logging.info("FastMCP Streamable HTTP transport available")
+                
+                # Note: FastMCP HTTP app requires the server to be running as main process
+                # Since we're embedding it in FastAPI, HTTP transport may not work fully
+                # SSE transport will be used as fallback
+                logging.info("FastMCP HTTP app created (may require server.run() for full functionality)")
+                        
             except Exception as http_err:
                 logging.warning("FastMCP HTTP app unavailable: %s", http_err)
         else:
@@ -40,18 +46,28 @@ try:
                     suffix = scope.get("path", "") or ""
                     routed_scope = dict(scope)
                     logging.info(f"MCPMux routing: original path='{suffix}'")
-                    if suffix in ("", "/"):
-                        # Route HTTP requests to root path for HTTP app
-                        routed_scope["path"] = "/"
+                    if suffix in ("", "/", "/mcp", "/mcp/"):
+                        # Route main MCP requests to /mcp path for HTTP app
+                        routed_scope["path"] = "/mcp"
                         target = self._http_app
-                        logging.info("MCPMux: routing to HTTP app at root path '/'")
-                    elif suffix.startswith("/sse") or suffix.startswith("/messages"):
-                        # Route SSE requests to root path for SSE app  
-                        routed_scope["path"] = "/"
+                        logging.info("MCPMux: routing to HTTP app at '/mcp' path")
+                    elif suffix.startswith("/mcp/messages"):
+                        # Route /mcp/messages to /messages for SSE app (not HTTP app!)
+                        routed_scope["path"] = "/messages" + suffix[13:]  # Remove "/mcp/messages" prefix, keep rest
                         target = self._sse_app
-                        logging.info("MCPMux: routing to SSE app at root path '/'")
+                        logging.info(f"MCPMux: routing to SSE app with path '/messages{suffix[13:]}'")
+                    elif suffix.startswith("/sse") or suffix.startswith("/messages"):
+                        # Route SSE requests with original path
+                        routed_scope["path"] = suffix
+                        target = self._sse_app
+                        logging.info(f"MCPMux: routing to SSE app with path '{suffix}'")
+                    elif suffix.startswith("/mcp/sse"):
+                        # Route /mcp/sse to /sse for SSE app
+                        routed_scope["path"] = "/sse"
+                        target = self._sse_app
+                        logging.info("MCPMux: routing to SSE app at '/sse' path")
                     else:
-                        # For other paths like /health, keep the suffix
+                        # For other paths, keep the suffix and route to HTTP app
                         routed_scope["path"] = suffix
                         target = self._http_app
                         logging.info(f"MCPMux: routing to HTTP app with path '{suffix}'")
