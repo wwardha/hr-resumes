@@ -28,6 +28,14 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 import EventSource from "eventsource";
 
 // Polyfill EventSource for Node.js so the SDK's SSE transport works.
@@ -171,27 +179,27 @@ async function main() {
     { capabilities: { tools: {} } }
   );
 
-  server.setRequestHandler("tools/list", async () => {
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
     return await client.listTools();
   });
-  server.setRequestHandler("tools/call", async (req) => {
+  server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: args } = req.params || {};
     if (!name) throw new Error("tools/call missing 'name' parameter");
     return await client.callTool(name, args ?? {});
   });
 
   // Optional: light bridging for resources/prompts; errors will bubble if unsupported by remote
-  server.setRequestHandler("resources/list", async () => {
+  server.setRequestHandler(ListResourcesRequestSchema, async () => {
     return await client.listResources();
   });
-  server.setRequestHandler("resources/read", async (req) => {
-    return await client.readResource(req);
+  server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
+    return await client.readResource(req.params);
   });
-  server.setRequestHandler("prompts/list", async () => {
+  server.setRequestHandler(ListPromptsRequestSchema, async () => {
     return await client.listPrompts();
   });
-  server.setRequestHandler("prompts/get", async (req) => {
-    return await client.getPrompt(req);
+  server.setRequestHandler(GetPromptRequestSchema, async (req) => {
+    return await client.getPrompt(req.params);
   });
 
   const transport = new StdioServerTransport();
