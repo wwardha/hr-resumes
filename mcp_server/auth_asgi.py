@@ -1,4 +1,5 @@
 import os
+import logging
 from starlette.responses import JSONResponse
 
 
@@ -20,6 +21,8 @@ class MCPAuthASGI:
             supplied = headers.get("authorization", "").removeprefix("Bearer ").strip() \
                 or headers.get("x-mcp-token", "")
             if not self.token or supplied != self.token:
+                redacted = supplied[:4] + "***" if supplied else "<missing>"
+                logging.warning("Unauthorized /mcp request: token mismatch (%s)", redacted)
                 if typ == "websocket":
                     await send({"type": "websocket.close", "code": 4401})
                 else:
