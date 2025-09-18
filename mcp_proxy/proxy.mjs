@@ -157,14 +157,13 @@ async function connectRemote() {
   await client.connect(transport);
 
   // Initialize remote and fetch tools list
-  const remoteInfo = await client.initialize();
   const tools = await client.listTools();
-  return { client, remoteInfo, tools };
+  return { client, tools };
 }
 
 // Start local stdio MCP server and forward calls
 async function main() {
-  const { client, remoteInfo, tools } = await connectRemote();
+  const { client, tools } = await connectRemote();
 
   const server = new Server(
     { name: "hr-resumes-stdio-proxy", version: "1.0.0" },
@@ -188,23 +187,19 @@ async function main() {
     );
   }
 
-  // Optional: light bridging for resources/prompts if remote supports them
-  if (remoteInfo.capabilities?.resources) {
-    server.setRequestHandler("resources/list", async () => {
-      return await client.listResources();
-    });
-    server.setRequestHandler("resources/read", async (req) => {
-      return await client.readResource(req);
-    });
-  }
-  if (remoteInfo.capabilities?.prompts) {
-    server.setRequestHandler("prompts/list", async () => {
-      return await client.listPrompts();
-    });
-    server.setRequestHandler("prompts/get", async (req) => {
-      return await client.getPrompt(req);
-    });
-  }
+  // Optional: light bridging for resources/prompts; errors will bubble if unsupported by remote
+  server.setRequestHandler("resources/list", async () => {
+    return await client.listResources();
+  });
+  server.setRequestHandler("resources/read", async (req) => {
+    return await client.readResource(req);
+  });
+  server.setRequestHandler("prompts/list", async () => {
+    return await client.listPrompts();
+  });
+  server.setRequestHandler("prompts/get", async (req) => {
+    return await client.getPrompt(req);
+  });
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
