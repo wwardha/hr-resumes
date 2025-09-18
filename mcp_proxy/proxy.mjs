@@ -44,6 +44,75 @@ if (!REMOTE_URL || typeof REMOTE_URL !== "string" || !REMOTE_URL.startsWith("htt
   process.exit(2);
 }
 
+// Custom SSE transport that supports Authorization headers (Node only)
+class SSEAuthClientTransport {
+  constructor(url, opts = {}) {
+    this._url = new URL(url);
+    this._headers = opts.headers || {};
+    this.onclose = undefined;
+    this.onerror = undefined;
+    this.onmessage = undefined;
+  }
+
+  start() {
+    if (this._es) throw new Error("Already started");
+    return new Promise((resolve, reject) => {
+      this._ac = new AbortController();
+      this._es = new EventSource(this._url.href, { headers: this._headers });
+      this._es.onerror = (event) => {
+        const err = new Error(`SSE error: ${JSON.stringify(event)}`);
+        reject(err);
+        this.onerror?.(err);
+      };
+      this._es.addEventListener("endpoint", (event) => {
+        try {
+          const data = event?.data;
+          this._endpoint = new URL(data, this._url);
+          if (this._endpoint.origin !== this._url.origin) {
+            throw new Error(`Endpoint origin mismatch: ${this._endpoint.origin}`);
+          }
+        } catch (e) {
+          reject(e);
+          this.onerror?.(e);
+          void this.close();
+          return;
+        }
+        resolve();
+      });
+      this._es.onmessage = (event) => {
+        let msg;
+        try {
+          msg = JSON.parse(event.data);
+        } catch (e) {
+          this.onerror?.(e);
+          return;
+        }
+        this.onmessage?.(msg);
+      };
+    });
+  }
+
+  async close() {
+    this._ac?.abort();
+    this._es?.close();
+    this.onclose?.();
+  }
+
+  async send(message) {
+    if (!this._endpoint) throw new Error("Not connected");
+    const res = await fetch(this._endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...this._headers },
+      body: JSON.stringify(message),
+      signal: this._ac?.signal,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`POST ${this._endpoint} failed (${res.status}): ${text}`);
+    }
+  }
+}
+
 // Connect to remote HTTP MCP first to fetch tools/capabilities
 async function connectRemote() {
   const headers = {};
@@ -56,7 +125,8 @@ async function connectRemote() {
   );
 
   console.error(`[proxy] Connecting to ${REMOTE_URL} ...`);
-  const transport = new SSEClientTransport(REMOTE_URL, { headers });
+  // Prefer our auth-capable transport; fall back to SDK SSE if needed
+  const transport = new SSEAuthClientTransport(REMOTE_URL, { headers });
   await client.connect(transport);
 
   // Initialize remote and fetch tools list
