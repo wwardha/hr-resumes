@@ -51,6 +51,7 @@ function headersFromEnv() {
   const bearer = process.env.MCP_REMOTE_BEARER || process.env.MCP_TOKEN;
   if (bearer) {
     headers["Authorization"] = `Bearer ${bearer}`;
+    headers["X-MCP-Token"] = bearer;
   }
   const extra = process.env.MCP_REMOTE_HEADERS_JSON;
   if (extra) {
