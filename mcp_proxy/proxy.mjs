@@ -180,9 +180,13 @@ async function connectClient() {
   try {
     // Ensure URL has trailing slash for HTTP transport to prevent 307 redirects
     const httpUrl = new URL(remoteUrl);
+    console.error(`[proxy] Original remoteUrl: ${remoteUrl}`);
+    console.error(`[proxy] Parsed URL pathname: ${httpUrl.pathname}`);
     if (!httpUrl.pathname.endsWith('/')) {
       httpUrl.pathname += '/';
+      console.error(`[proxy] Added trailing slash: ${httpUrl.pathname}`);
     }
+    console.error(`[proxy] Final HTTP URL: ${httpUrl.href}`);
     const shttp = new StreamableHTTPClientTransport(httpUrl, { requestInit: { headers } });
     await client.connect(shttp);
     console.error(`[proxy] Connected to ${httpUrl} via Streamable HTTP`);
@@ -192,6 +196,7 @@ async function connectClient() {
     const sseUrl = (() => {
       try {
         const u = new URL(remoteUrl);
+        console.error(`[proxy] Building SSE URL from: ${remoteUrl}`);
         if (u.pathname.endsWith("/sse")) {
           // already a full SSE URL
         } else if (u.pathname.endsWith("/mcp")) {
@@ -201,6 +206,7 @@ async function connectClient() {
         } else {
           u.pathname = `${u.pathname.replace(/\/$/, "")}/mcp/sse`;
         }
+        console.error(`[proxy] Final SSE URL: ${u.href}`);
         return u;
       } catch (e) {
         console.error("[proxy] Failed to derive SSE URL from", remoteUrl, e);

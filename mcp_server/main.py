@@ -39,15 +39,22 @@ try:
                 if scope.get("type") in {"http", "websocket"}:
                     suffix = scope.get("path", "") or ""
                     routed_scope = dict(scope)
+                    logging.info(f"MCPMux routing: original path='{suffix}'")
                     if suffix in ("", "/"):
-                        routed_scope["path"] = "/mcp"
+                        # Route HTTP requests to root path for HTTP app
+                        routed_scope["path"] = "/"
                         target = self._http_app
+                        logging.info("MCPMux: routing to HTTP app at root path '/'")
                     elif suffix.startswith("/sse") or suffix.startswith("/messages"):
-                        routed_scope["path"] = suffix
+                        # Route SSE requests to root path for SSE app  
+                        routed_scope["path"] = "/"
                         target = self._sse_app
+                        logging.info("MCPMux: routing to SSE app at root path '/'")
                     else:
-                        routed_scope["path"] = "/mcp" + suffix
+                        # For other paths like /health, keep the suffix
+                        routed_scope["path"] = suffix
                         target = self._http_app
+                        logging.info(f"MCPMux: routing to HTTP app with path '{suffix}'")
                 await target(routed_scope, receive, send)
 
         if http_enabled and http_app is not None:
