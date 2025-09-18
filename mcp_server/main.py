@@ -18,7 +18,7 @@ try:
         if hasattr(server, "streamable_http_app"):
             logging.info("FastMCP server exposes streamable_http_app callable")
             try:
-                http_app = server.streamable_http_app(mount_path="/mcp")
+                http_app = server.streamable_http_app()
                 http_enabled = True
                 logging.info("FastMCP Streamable HTTP transport available")
             except Exception as http_err:
@@ -26,7 +26,7 @@ try:
         else:
             logging.info("FastMCP server missing streamable_http_app; using SSE only")
 
-        sse_app = server.sse_app(mount_path="/mcp")
+        sse_app = server.sse_app()
 
         if http_enabled and http_app is not None:
             mcp_app = FastAPI(title="MCP Multiplexer")
