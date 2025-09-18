@@ -42,10 +42,11 @@ async function connectRemote() {
   const headers = {};
   if (MCP_TOKEN) headers["Authorization"] = `Bearer ${MCP_TOKEN}`;
 
-  const client = new Client({
-    name: "hr-resumes-proxy-client",
-    version: "1.0.0",
-  });
+  // The JS SDK expects client capabilities in the constructor options.
+  const client = new Client(
+    { name: "hr-resumes-proxy-client", version: "1.0.0" },
+    { capabilities: {} }
+  );
 
   const transport = new SSEClientTransport(REMOTE_URL, { headers });
   await client.connect(transport);
@@ -108,4 +109,3 @@ main().catch((err) => {
   console.error("Proxy crashed:", err?.stack || err);
   process.exit(1);
 });
-
