@@ -164,14 +164,13 @@ async function connectRemote() {
   const transport = new SSEAuthClientTransport(REMOTE_URL, { headers });
   await client.connect(transport);
 
-  // Initialize remote and fetch tools list
-  const tools = await client.listTools();
-  return { client, tools };
+  // Do not block on tools/list here; we'll forward requests dynamically
+  return { client };
 }
 
 // Start local stdio MCP server and forward calls
 async function main() {
-  const { client, tools } = await connectRemote();
+  const { client } = await connectRemote();
 
   const server = new Server(
     { name: "hr-resumes-stdio-proxy", version: "1.0.0" },
@@ -204,6 +203,7 @@ async function main() {
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  console.error("[proxy] Ready: local stdio server started (stdio)");
 }
 
 main().catch((err) => {
