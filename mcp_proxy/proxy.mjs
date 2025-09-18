@@ -35,11 +35,12 @@ if (!globalThis.EventSource) {
   globalThis.EventSource = EventSource;
 }
 
-const REMOTE_URL = process.env.MCP_REMOTE_URL;
-const MCP_TOKEN = process.env.MCP_TOKEN;
+// Allow either env vars or CLI args: node proxy.mjs <REMOTE_URL> <TOKEN>
+const REMOTE_URL = process.env.MCP_REMOTE_URL || process.argv[2];
+const MCP_TOKEN = process.env.MCP_TOKEN || process.argv[3];
 
-if (!REMOTE_URL) {
-  console.error("MCP_REMOTE_URL is required (e.g., https://host/mcp/sse)");
+if (!REMOTE_URL || typeof REMOTE_URL !== "string" || !REMOTE_URL.startsWith("http")) {
+  console.error("MCP_REMOTE_URL is required (e.g., https://host/mcp/sse). You can set it via env or first arg.");
   process.exit(2);
 }
 
@@ -54,6 +55,7 @@ async function connectRemote() {
     { capabilities: {} }
   );
 
+  console.error(`[proxy] Connecting to ${REMOTE_URL} ...`);
   const transport = new SSEClientTransport(REMOTE_URL, { headers });
   await client.connect(transport);
 
