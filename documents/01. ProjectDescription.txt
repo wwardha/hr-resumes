@@ -1,0 +1,178 @@
+# Project Description
+
+A single-container “living FastAPI” workspace that you control from any **public MCP client** (e.g., Claude Desktop). You speak natural briefs; the system uses a local **Claude CLI** (inside the container) to **generate or modify** a separate FastAPI app, which hot‑reloads and exposes endpoints. Both the control plane and the generated API are **MCP servers**. Public access is fronted by **Cloudflare Tunnel** with **Cloudflare Access** authentication (Service Tokens). The apps themselves require an **MCP API key** (defense‑in‑depth).
+
+---
+
+## Goals
+
+* Remotely develop FastAPI inside a container via natural language.
+* Two MCP servers: (1) **Control Plane** (orchestrates builds) and (2) **Generated API (+ MCP)** (the app you’re building, also exposing dynamic MCP tools).
+* Model brain is **Claude CLI** (no Anthropic HTTP calls from your code).
+* Public, secure access using **Cloudflare Tunnel** + **Cloudflare Access Service Tokens**, plus app‑level **Bearer API key**.
+
+---
+
+## Tech Stack
+
+* **Language/Runtime:** Python 3.11
+* **Frameworks:** FastAPI, Uvicorn (reload for generated API)
+* **Typing/Validation:** Pydantic v2
+* **HTTP client:** httpx
+* **Templating:** Jinja2 (for prompt templates)
+* **MCP:** `mcp` server library; FastAPI router adapter
+* **Process management:** `supervisord` (runs 3 processes: control-plane MCP, Claude service, generated API)
+* **LLM runner:** **Claude CLI** (invoked as a subprocess)
+* **Container orchestration:** Docker / docker‑compose
+* **Edge:** Cloudflare Tunnel (cloudflared sidecar)
+* **Auth:** Cloudflare Access (Service Tokens) + app-level `Authorization: Bearer <MCP_TOKEN>`
+
+---
+
+## Components & Ports (internal only)
+
+* **Control Plane MCP Server** (FastAPI) — `:8000`
+
+  * Tools to: generate code from a brief, write files, install packages, run allow‑listed commands (e.g., Alembic), and register **MCP tools** inside the generated API.
+  * Protected `/mcp/*` by app‑level token.
+* **Claude Code Service** — `:8300`
+
+  * Wraps **Claude CLI** for: `/generate`, `/apply_files`, `/pip_install`, `/complete`, `/run_allowed`.
+  * Requires `X-Admin-Token`.
+* **Generated API (+ MCP)** — `:9000`
+
+  * The app that gets created/extended. Auto‑reloads when files change.
+  * Exposes `/mcp/*` and supports **dynamic MCP tools** loaded from a JSON spec file.
+  * Protected `/mcp/*` by app‑level token and admin endpoints by `X-Admin-Token`.
+* **Cloudflared** sidecar — no inbound host ports; creates public HTTPS hostnames:
+
+  * `mcp.example.com` → `http://app:8000`
+  * `gen-mcp.example.com` → `http://app:9000`
+
+> **Important:** None of `8000/8300/9000` are published to the host; only Cloudflare edge reaches them.
+
+---
+
+## Security Model
+
+1. **Cloudflare Tunnel** provides TLS and public hostnames without opening host ports.
+2. **Cloudflare Access (Service Tokens)** requires two headers from the client:
+
+   * `CF-Access-Client-Id: <id>`
+   * `CF-Access-Client-Secret: <secret>`
+3. **App-level API key** for MCP paths:
+
+   * `Authorization: Bearer <MCP_TOKEN>`
+4. **Admin token** to mutate code or register tools:
+
+   * `X-Admin-Token: <ADMIN_TOKEN>`
+5. **Allow‑listed shell commands** only (e.g., Alembic) via `run_allowed_command`.
+
+---
+
+## High-Level Flow
+
+1. **Claude Desktop** (or any MCP client) connects to **control-plane MCP** at `mcp.example.com/mcp/` with required headers.
+2. You type a **natural brief** (e.g., “Add POST /v1/summarize {text} returning 3 bullets”).
+3. Control plane calls the **Claude service** → **Claude CLI** returns a file plan (`packages`, `files[]`).
+4. Files are written under `/workspace/generated_api`, optional `pip install` runs; generated API **hot‑reloads**.
+5. Optionally register new **MCP tools** into the generated API (appear under `gen-mcp.example.com/mcp/`).
+
+---
+
+## Directory Skeleton
+
+```
+living-fastapi/
+├─ docker-compose.yml
+├─ Dockerfile
+├─ supervisord.conf
+├─ requirements.txt
+├─ .env.example
+├─ cloudflared/
+│  └─ config.yml                # optional if using token-based tunnel
+├─ mcp_server/
+│  ├─ main.py
+│  ├─ tools.py
+│  ├─ settings.py
+│  └─ auth_asgi.py
+├─ claude_code/
+│  └─ service.py
+├─ generated_api/
+│  ├─ app.py
+│  └─ mcp_dynamic.py
+└─ README.md
+```
+
+---
+
+## Control Plane — Key Tools
+
+* `build_from_brief(brief)` — Generate/extend the app via Claude CLI.
+* `apply_files_to_generated_api(files, install?, packages?)` — Write specific files, optionally install packages.
+* `pip_install_in_container(packages[])` — Install PyPI libs.
+* `run_allowed_command(cmd)` — Execute one of the allow‑listed shell commands (e.g., `alembic upgrade head`).
+* `register_mcp_tool_in_generated_api(spec)` — Add a dynamic **MCP tool** to the generated API.
+
+---
+
+## Dynamic MCP Tools (Generated API)
+
+* Stored in `_mcp_tools.json`.
+* Two backends:
+
+  * **static:** return fixed text/JSON.
+  * **claude:** Jinja2 prompt → call Claude CLI → (optionally) parse JSON.
+* Admin endpoints (`/_gen_admin/mcp_tools`) manage tools; writing the spec triggers hot‑reload.
+
+---
+
+## Cloudflare Setup (summary)
+
+1. Create a **Tunnel** and map hostnames:
+
+   * `mcp.example.com` → `http://app:8000`
+   * `gen-mcp.example.com` → `http://app:9000`
+2. Configure **Access** app per hostname using **Service Tokens** (non‑interactive).
+3. In Claude Desktop MCP config, set headers:
+
+   * `CF-Access-Client-Id`, `CF-Access-Client-Secret`, and `Authorization: Bearer <MCP_TOKEN>`.
+
+---
+
+## Environment Variables (.env)
+
+```
+# Security
+ADMIN_TOKEN=change-me-admin
+MCP_TOKEN=change-me-mcp
+
+# Claude CLI integration
+CLAUDE_CLI_PATH=claude           # binary on PATH or full path
+
+# Optional: Cloudflare Tunnel via token
+CLOUDFLARE_TUNNEL_TOKEN=XXX
+
+# App
+HOST=0.0.0.0
+PORT=8000
+WORKSPACE_DIR=/workspace
+GENERATED_DIR=/workspace/generated_api
+```
+
+---
+
+## Development Notes
+
+* Keep briefs short but precise; the control plane already enforces “return ONLY JSON with packages+files”.
+* Use `pip_install_in_container` before running Alembic.
+* Don’t expose 8000/8300/9000 to host; only the tunnel or proxy is public.
+* Rotate `MCP_TOKEN` and `Service Tokens` periodically.
+
+---
+
+## Next Steps
+
+* Set Cloudflare Tunnel + Access, fill `.env`, and `docker compose up -d`.
+* Add both MCP servers to Claude Desktop with the headers.
+* Paste your first brief.

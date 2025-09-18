@@ -1,0 +1,781 @@
+Below is a complete **initial codebase** to paste into the project skeleton. It assumes a single container running three processes via **supervisord**, plus a **cloudflared** sidecar in docker‑compose. The Claude integration uses the **Claude CLI** binary inside the container.
+
+> Replace `mcp.example.com` / `gen-mcp.example.com` with your domains. Keep 8000/8300/9000 private (no host publishes).
+
+---
+
+## requirements.txt
+
+```txt
+fastapi>=0.112.0
+uvicorn[standard]>=0.30.0
+httpx>=0.27.0
+pydantic>=2.7.0
+jinja2>=3.1.4
+mcp>=1.1.0
+```
+
+---
+
+## Dockerfile
+
+```dockerfile
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    WORKSPACE_DIR=/workspace \
+    GENERATED_DIR=/workspace/generated_api \
+    HOST=0.0.0.0
+
+WORKDIR /workspace
+
+# System tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tini supervisor ca-certificates curl git && \
+    rm -rf /var/lib/apt/lists/*
+
+# Python deps
+COPY requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Project files
+COPY mcp_server ./mcp_server
+COPY claude_code ./claude_code
+COPY generated_api ./generated_api
+COPY supervisord.conf /etc/supervisord.conf
+
+EXPOSE 8000 8300 9000
+
+ENTRYPOINT ["/usr/bin/tini","--"]
+CMD ["supervisord","-c","/etc/supervisord.conf"]
+```
+
+---
+
+## docker-compose.yml
+
+```yaml
+version: "3.9"
+
+networks:
+  appnet:
+    # internal: true   # uncomment to block direct egress; keep off if you need pip installs
+
+services:
+  app:
+    build: .
+    env_file: .env
+    expose:
+      - "8000"   # control-plane MCP (internal)
+      - "8300"   # Claude service (internal)
+      - "9000"   # generated API (+ MCP) (internal)
+    networks: [appnet]
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    # Option A: token-based tunnel (recommended)
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    # Option B: config file instead of token
+    # volumes:
+    #   - ./cloudflared:/etc/cloudflared
+    networks: [appnet]
+    restart: unless-stopped
+```
+
+---
+
+## supervisord.conf
+
+```ini
+[supervisord]
+nodaemon=true
+loglevel=info
+
+[program:mcp]
+command=uvicorn mcp_server.main:app --host 0.0.0.0 --port 8000
+directory=/workspace
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stderr_logfile=/dev/stderr
+
+[program:claude]
+command=uvicorn claude_code.service:app --host 0.0.0.0 --port 8300
+directory=/workspace
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stderr_logfile=/dev/stderr
+
+[program:generated]
+command=uvicorn generated_api.app:app --host 0.0.0.0 --port 9000 --reload --reload-dir /workspace/generated_api
+directory=/workspace
+autostart=true
+autorestart=true
+stdout_logfile=/dev/stdout
+stderr_logfile=/dev/stderr
+```
+
+---
+
+## .env.example
+
+```env
+# Security
+ADMIN_TOKEN=change-me-admin
+MCP_TOKEN=change-me-mcp
+
+# Claude CLI
+CLAUDE_CLI_PATH=claude    # or /usr/local/bin/claude
+
+# Cloudflare Tunnel (token method)
+CLOUDFLARE_TUNNEL_TOKEN=your-tunnel-token
+
+# App paths
+WORKSPACE_DIR=/workspace
+GENERATED_DIR=/workspace/generated_api
+```
+
+---
+
+## mcp\_server/settings.py
+
+```python
+from pydantic import BaseModel, Field
+import os
+from pathlib import Path
+
+class Settings(BaseModel):
+    admin_token: str | None = Field(default=os.getenv("ADMIN_TOKEN"))
+    mcp_token: str | None = Field(default=os.getenv("MCP_TOKEN"))
+
+    # Local services
+    claude_code_url: str = Field(default=os.getenv("CLAUDE_CODE_URL", "http://127.0.0.1:8300"))
+
+    # Paths
+    workspace_dir: Path = Field(default=Path(os.getenv("WORKSPACE_DIR", "/workspace")))
+    generated_dir: Path = Field(default=Path(os.getenv("GENERATED_DIR", "/workspace/generated_api")))
+
+settings = Settings()
+settings.workspace_dir.mkdir(parents=True, exist_ok=True)
+settings.generated_dir.mkdir(parents=True, exist_ok=True)
+```
+
+---
+
+## mcp\_server/auth\_asgi.py
+
+```python
+import os
+from starlette.responses import JSONResponse
+
+TOKEN = os.getenv("MCP_TOKEN", "").strip()
+
+class MCPAuthASGI:
+    """Protects /mcp over HTTP, SSE, and WebSocket with a static Bearer token."""
+    def __init__(self, app, token: str | None = None):
+        self.app = app
+        self.token = (token or TOKEN)
+
+    async def __call__(self, scope, receive, send):
+        path = scope.get("path", ""); typ = scope.get("type", "")
+        if path.startswith("/mcp"):
+            headers = {k.decode().lower(): v.decode() for k,v in scope.get("headers", [])}
+            supplied = headers.get("authorization", "").removeprefix("Bearer ").strip() \
+                       or headers.get("x-mcp-token", "")
+            if not self.token or supplied != self.token:
+                if typ == "websocket":
+                    await send({"type": "websocket.close", "code": 4401})
+                else:
+                    await JSONResponse({"detail":"unauthorized"}, status_code=401)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+```
+
+---
+
+## mcp\_server/tools.py
+
+```python
+from mcp.server import Server
+from mcp.logging import setup_logging
+from typing import Optional, Dict, Any, List
+from pydantic import BaseModel, Field
+import httpx, os, json
+from .settings import settings
+
+setup_logging()
+server = Server("living-fastapi-mcp")
+
+# Headers with admin token for Claude service
+
+def _headers():
+    h = {"Content-Type": "application/json"}
+    if settings.admin_token:
+        h["X-Admin-Token"] = settings.admin_token
+    return h
+
+# ----- Tool DTOs -----
+class BriefReq(BaseModel):
+    brief: str
+    install: bool = True
+    return_plan: bool = True
+
+class FilesReq(BaseModel):
+    files: Dict[str, str]
+    install: bool = False
+    packages: List[str] = Field(default_factory=list)
+
+class PipReq(BaseModel):
+    packages: List[str]
+
+class AllowedCmdReq(BaseModel):
+    cmd: str
+
+class RegisterGenMcpToolReq(BaseModel):
+    name: str
+    description: str
+    inputSchema: Dict[str, Any]
+    backend: str  # "static" | "claude"
+    static: Optional[Dict[str, Any]] = None
+    claude: Optional[Dict[str, Any]] = None
+
+# ----- Tools -----
+@server.tool(
+    name="build_from_brief",
+    description=(
+        "Generate or modify the separate FastAPI app (port 9000) from a natural-language brief. "
+        "Writes files under /workspace/generated_api, installs packages if needed, and hot-reloads."
+    ),
+    inputSchema={
+        "type":"object",
+        "properties":{"brief":{"type":"string"}},
+        "required":["brief"]
+    }
+)
+async def build_from_brief(brief: str):
+    async with httpx.AsyncClient(timeout=600) as client:
+        r = await client.post(
+            f"{settings.claude_code_url}/generate",
+            headers=_headers(),
+            json={"brief": brief, "install": True, "return_plan": True}
+        )
+        return [{"type":"text","text": r.text}]
+
+@server.tool(
+    name="apply_files_to_generated_api",
+    description="Write/overwrite specific files in the generated API; optional pip install.",
+    inputSchema={
+        "type":"object",
+        "properties":{
+            "files":{"type":"object"},
+            "install":{"type":"boolean","default":False},
+            "packages":{"type":"array","items":{"type":"string"}}
+        },
+        "required":["files"]
+    }
+)
+async def apply_files_to_generated_api(files: Dict[str,str], install: bool=False, packages: Optional[List[str]]=None):
+    payload = {"files": files, "install": install, "packages": packages or []}
+    async with httpx.AsyncClient(timeout=600) as client:
+        r = await client.post(f"{settings.claude_code_url}/apply_files", headers=_headers(), json=payload)
+        return [{"type":"text","text": r.text}]
+
+@server.tool(
+    name="pip_install_in_container",
+    description="Install extra Python packages inside the container.",
+    inputSchema={"type":"object","properties":{"packages":{"type":"array","items":{"type":"string"}}},"required":["packages"]}
+)
+async def pip_install_in_container(packages: List[str]):
+    async with httpx.AsyncClient(timeout=1200) as client:
+        r = await client.post(f"{settings.claude_code_url}/pip_install", headers=_headers(), json={"packages": packages})
+        return [{"type":"text","text": r.text}]
+
+@server.tool(
+    name="run_allowed_command",
+    description="Run an allow-listed shell command (e.g., alembic upgrade head).",
+    inputSchema={"type":"object","properties":{"cmd":{"type":"string"}},"required":["cmd"]}
+)
+async def run_allowed_command(cmd: str):
+    async with httpx.AsyncClient(timeout=1200) as client:
+        r = await client.post(f"{settings.claude_code_url}/run_allowed", headers=_headers(), json={"cmd": cmd})
+        return [{"type":"text","text": r.text}]
+
+@server.tool(
+    name="register_mcp_tool_in_generated_api",
+    description="Register a new MCP tool in the Generated API and trigger hot-reload.",
+    inputSchema={
+        "type":"object",
+        "properties":{
+            "name":{"type":"string"},
+            "description":{"type":"string"},
+            "inputSchema":{"type":"object"},
+            "backend":{"type":"string","enum":["static","claude"]},
+            "static":{"type":"object"},
+            "claude":{"type":"object"}
+        },
+        "required":["name","description","inputSchema","backend"]
+    }
+)
+async def register_mcp_tool_in_generated_api(name: str, description: str, inputSchema: Dict[str,Any], backend: str,
+                                             static: Optional[Dict[str,Any]]=None, claude: Optional[Dict[str,Any]]=None):
+    payload = {"name": name, "description": description, "inputSchema": inputSchema, "backend": backend, "static": static, "claude": claude}
+    gen_admin = os.getenv("GEN_ADMIN_URL", "http://127.0.0.1:9000/_gen_admin/mcp_tools")
+    async with httpx.AsyncClient(timeout=300) as client:
+        r = await client.post(gen_admin, headers=_headers(), json=payload)
+        return [{"type":"text","text": r.text}]
+```
+
+---
+
+## mcp\_server/main.py
+
+```python
+from fastapi import FastAPI
+from mcp.server.fastapi import create_fastapi_router
+from mcp.logging import setup_logging
+from .tools import server
+from .auth_asgi import MCPAuthASGI
+
+setup_logging()
+inner = FastAPI(title="Living FastAPI - MCP Server")
+inner.include_router(create_fastapi_router(server), prefix="/mcp")
+
+@inner.get("/health")
+async def health():
+    return {"ok": True}
+
+# Protect /mcp with Bearer token
+app = MCPAuthASGI(inner)
+```
+
+---
+
+## claude\_code/service.py (Claude CLI integration)
+
+```python
+from fastapi import FastAPI, HTTPException, Body, Header
+from pydantic import BaseModel, Field
+from typing import Dict, List, Optional
+from pathlib import Path
+import json, os, subprocess, time
+
+WORKSPACE = Path(os.getenv("WORKSPACE_DIR", "/workspace")).resolve()
+GENERATED = Path(os.getenv("GENERATED_DIR", "/workspace/generated_api")).resolve()
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+CLAUDE_CLI_PATH = os.getenv("CLAUDE_CLI_PATH", "claude")
+
+app = FastAPI(title="Claude Code (local CLI)")
+
+# ---- DTOs ----
+class GenerateReq(BaseModel):
+    brief: str
+    install: bool = True
+    return_plan: bool = True
+
+class ApplyFilesReq(BaseModel):
+    files: Dict[str, str]
+    install: bool = False
+    packages: List[str] = Field(default_factory=list)
+
+class PipReq(BaseModel):
+    packages: List[str]
+
+class CompleteReq(BaseModel):
+    prompt: str
+    system: Optional[str] = None
+    max_tokens: int = 1500
+    temperature: float = 0.1
+
+class AllowedCmdReq(BaseModel):
+    cmd: str
+
+# ---- helpers ----
+ALLOWED_CMDS = [
+    "alembic upgrade head",
+    "alembic downgrade -1",
+    "alembic revision --autogenerate -m ",
+    "pytest -q",
+]
+
+def _require_admin(x_admin_token: Optional[str]):
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=500, detail="ADMIN_TOKEN not configured")
+    if (x_admin_token or "") != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid admin token")
+
+def _safe_rel_path(p: str) -> Path:
+    pth = (WORKSPACE / p).resolve()
+    if not str(pth).startswith(str(WORKSPACE)):
+        raise HTTPException(status_code=400, detail=f"path escapes workspace: {p}")
+    return pth
+
+def _write_files(files: Dict[str,str]):
+    written = []
+    for rel, content in files.items():
+        rel = rel.lstrip("/").replace("\\", "/")
+        dst = _safe_rel_path(rel)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_text(content, "utf-8")
+        written.append(str(dst))
+    return written
+
+def _pip_install(pkgs: List[str]) -> str:
+    if not pkgs:
+        return "no packages"
+    cmd = ["python","-m","pip","install","--no-cache-dir",*pkgs]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    return f"cmd: {' '.join(cmd)}\nexit:{proc.returncode}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+
+# Claude CLI call
+
+def _call_cli(prompt: str, system: Optional[str], max_tokens: int, temperature: float) -> str:
+    if system:
+        prompt = f"[SYSTEM]\n{system}\n[/SYSTEM]\n\n{prompt}"
+    cmd = [CLAUDE_CLI_PATH, "-p", "--output-format", "json", "--max-tokens", str(max_tokens), "--temperature", str(temperature)]
+    proc = subprocess.run(cmd, input=prompt, text=True, capture_output=True)
+    if proc.returncode != 0:
+        raise HTTPException(status_code=500, detail=f"claude CLI failed: {proc.stderr[-2000:]}")
+    out = (proc.stdout or "").strip()
+    try:
+        data = json.loads(out)
+        text = data.get("text") or data.get("output") or data.get("content") or data.get("message") or data.get("completion")
+        return (text or out).strip()
+    except Exception:
+        return out
+
+# ---- API ----
+@app.get("/health")
+async def health():
+    return {"ok": True, "generated": GENERATED.exists()}
+
+@app.get("/list")
+async def list_files(x_admin_token: Optional[str] = Header(None)):
+    _require_admin(x_admin_token)
+    files = []
+    for p in GENERATED.rglob("*"):
+        if p.is_file():
+            files.append(str(p.relative_to(WORKSPACE)))
+    return {"files": files}
+
+@app.post("/pip_install")
+async def pip_install(req: PipReq, x_admin_token: Optional[str] = Header(None)):
+    _require_admin(x_admin_token)
+    return {"result": _pip_install(req.packages)}
+
+@app.post("/apply_files")
+async def apply_files(req: ApplyFilesReq, x_admin_token: Optional[str] = Header(None)):
+    _require_admin(x_admin_token)
+    written = _write_files(req.files)
+    result = ""
+    if req.install and req.packages:
+        result = _pip_install(req.packages)
+    # trigger reload
+    (GENERATED / "__reload__.txt").write_text(str(time.time()), "utf-8")
+    return {"written": written, "pip": result}
+
+@app.post("/generate")
+async def generate(req: GenerateReq, x_admin_token: Optional[str] = Header(None)):
+    _require_admin(x_admin_token)
+    system = (
+        "You generate a working FastAPI project INSIDE an existing container.\n"
+        "Return ONLY JSON (no fences) with keys: packages, files, notes.\n"
+        "Main ASGI app at 'generated_api/app.py' exporting app = FastAPI().\n"
+        "Create all referenced modules. Include a /health route. Use env vars for secrets."
+    )
+    user = f"Build/modify a FastAPI app per this brief:\n{req.brief}\nReturn files under /workspace (relative paths)."
+
+    text = _call_cli(user, system=system, max_tokens=4000, temperature=0.1)
+    try:
+        plan = json.loads(text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Model did not return valid JSON:\n{e}\n{text[:1200]}")
+
+    packages = plan.get("packages", [])
+    files = {f["path"]: f["content"] for f in plan.get("files", [])}
+    if "generated_api/app.py" not in files:
+        raise HTTPException(status_code=400, detail="Output must include generated_api/app.py")
+
+    written = _write_files(files)
+    pip_res = _pip_install(packages) if (req.install and packages) else ""
+
+    (GENERATED / "__reload__.txt").write_text(str(time.time()), "utf-8")
+
+    res = {"written": written, "packages": packages, "notes": plan.get("notes", "")}
+    if req.return_plan:
+        res["plan"] = plan
+    if pip_res:
+        res["pip"] = pip_res
+    return res
+
+@app.post("/complete")
+async def complete(req: CompleteReq, x_admin_token: Optional[str] = Header(None)):
+    _require_admin(x_admin_token)
+    out = _call_cli(req.prompt, req.system, req.max_tokens, req.temperature)
+    return {"text": out}
+
+@app.post("/run_allowed")
+async def run_allowed(req: AllowedCmdReq, x_admin_token: Optional[str] = Header(None)):
+    _require_admin(x_admin_token)
+    cmd = req.cmd.strip()
+    if not any(cmd.startswith(p) for p in ALLOWED_CMDS):
+        raise HTTPException(status_code=400, detail=f"Command not allowed: {cmd}")
+    proc = subprocess.run(cmd, cwd=str(GENERATED), shell=True, capture_output=True, text=True)
+    return {"cmd": cmd, "exit": proc.returncode, "stdout": proc.stdout[-4000:], "stderr": proc.stderr[-4000:]}
+```
+
+---
+
+## generated\_api/mcp\_dynamic.py
+
+```python
+from __future__ import annotations
+from typing import Any, Dict, Optional, List
+from pydantic import BaseModel, Field
+from mcp.server import Server
+from mcp.server.fastapi import create_fastapi_router
+from mcp.logging import setup_logging
+from jinja2 import Template
+import json, os, httpx
+from pathlib import Path
+
+setup_logging()
+ROOT = Path(os.getenv("WORKSPACE_DIR", "/workspace"))
+TOOLS_FILE = Path(os.getenv("MCP_TOOLS_FILE", "/workspace/generated_api/_mcp_tools.json"))
+CLAUDE_CODE_URL = os.getenv("CLAUDE_CODE_URL", "http://127.0.0.1:8300")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+
+class ClaudeSpec(BaseModel):
+    prompt_template: str
+    system: Optional[str] = None
+    expect_json: bool = False
+    max_tokens: int = 1200
+    temperature: float = 0.1
+
+class StaticSpec(BaseModel):
+    text: Optional[str] = None
+    json: Optional[Dict[str, Any]] = None
+
+class ToolSpec(BaseModel):
+    name: str
+    description: str
+    inputSchema: Dict[str, Any] = Field(default_factory=dict)
+    backend: str = Field(default="static", pattern="^(static|claude)$")
+    static: Optional[StaticSpec] = None
+    claude: Optional[ClaudeSpec] = None
+
+async def _call_claude(prompt: str, system: Optional[str], max_tokens: int, temperature: float) -> str:
+    headers = {"Content-Type": "application/json"}
+    if ADMIN_TOKEN:
+        headers["X-Admin-Token"] = ADMIN_TOKEN
+    payload = {"prompt": prompt, "system": system, "max_tokens": max_tokens, "temperature": temperature}
+    async with httpx.AsyncClient(timeout=600) as client:
+        r = await client.post(f"{CLAUDE_CODE_URL}/complete", headers=headers, json=payload)
+        r.raise_for_status()
+        return r.json().get("text", "")
+
+def build_server() -> Server:
+    server = Server("generated-api-mcp")
+
+    def _load_specs() -> List[ToolSpec]:
+        if not TOOLS_FILE.exists():
+            return []
+        data = json.loads(TOOLS_FILE.read_text("utf-8"))
+        return [ToolSpec.model_validate(x) for x in data]
+
+    specs = _load_specs()
+
+    @server.tool(name="list_dynamic_tools", description="List tool specs currently active.", inputSchema={"type":"object","properties":{}})
+    async def list_dynamic_tools():
+        return [{"type":"text","text": json.dumps([s.model_dump() for s in specs], indent=2)}]
+
+    for spec in specs:
+        if spec.backend == "static":
+            async def _make_static(spec: ToolSpec):
+                async def tool_func(**kwargs):
+                    if spec.static and spec.static.json is not None:
+                        return [{"type":"text","text": json.dumps(spec.static.json)}]
+                    return [{"type":"text","text": (spec.static.text if spec.static else "")}]
+                return tool_func
+            tool_fn = _make_static(spec)
+        else:
+            async def _make_claude(spec: ToolSpec):
+                async def tool_func(**kwargs):
+                    prompt = Template(spec.claude.prompt_template if spec.claude else "").render(args=kwargs)
+                    text = await _call_claude(prompt, spec.claude.system if spec.claude else None,
+                                              spec.claude.max_tokens if spec.claude else 1200,
+                                              spec.claude.temperature if spec.claude else 0.1)
+                    if spec.claude and spec.claude.expect_json:
+                        try:
+                            obj = json.loads(text)
+                            return [{"type":"text","text": json.dumps(obj)}]
+                        except Exception:
+                            return [{"type":"text","text": json.dumps({"_warning":"model did not return JSON","raw": text[:1500]})}]
+                    return [{"type":"text","text": text}]
+                return tool_func
+            tool_fn = _make_claude(spec)
+
+        server.add_tool(name=spec.name, description=spec.description, input_schema=spec.inputSchema, func=tool_fn)
+
+    return server
+```
+
+---
+
+## generated\_api/app.py
+
+```python
+from fastapi import FastAPI, HTTPException, Header, Body
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
+from pathlib import Path
+import json, os, time
+
+from mcp.server.fastapi import create_fastapi_router
+from .mcp_dynamic import build_server, ToolSpec
+
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "")
+TOOLS_FILE = Path(os.getenv("MCP_TOOLS_FILE", "/workspace/generated_api/_mcp_tools.json"))
+RELOAD_SENTINEL = Path("/workspace/generated_api/__reload__.txt")
+
+app = FastAPI(title="Generated API (Live)")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_headers=["*"], allow_methods=["*"])
+
+# Basic health
+@app.get("/health")
+async def health():
+    return {"ok": True, "mcp": True}
+
+# Mount MCP
+_server = build_server()
+app.include_router(create_fastapi_router(_server), prefix="/mcp")
+
+# Admin endpoints to manage MCP tools
+def _require_admin(token: Optional[str]):
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=500, detail="ADMIN_TOKEN not configured")
+    if (token or "") != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="invalid admin token")
+
+class RegisterToolBody(BaseModel):
+    name: str
+    description: str
+    inputSchema: Dict[str, Any]
+    backend: str
+    static: Optional[Dict[str, Any]] = None
+    claude: Optional[Dict[str, Any]] = None
+
+@app.get("/_gen_admin/mcp_tools")
+async def list_tools(x_admin_token: Optional[str] = Header(None)):
+    _require_admin(x_admin_token)
+    if not TOOLS_FILE.exists():
+        return []
+    return json.loads(TOOLS_FILE.read_text("utf-8"))
+
+@app.post("/_gen_admin/mcp_tools")
+async def register_tool(body: RegisterToolBody = Body(...), x_admin_token: Optional[str] = Header(None)):
+    _require_admin(x_admin_token)
+    items = []
+    if TOOLS_FILE.exists():
+        items = json.loads(TOOLS_FILE.read_text("utf-8"))
+    # replace by name
+    items = [x for x in items if x.get("name") != body.name] + [body.model_dump()]
+    TOOLS_FILE.write_text(json.dumps(items, indent=2), "utf-8")
+    RELOAD_SENTINEL.write_text(str(time.time()), "utf-8")
+    return {"status":"ok","message":"tool registered; server will auto-reload"}
+
+@app.delete("/_gen_admin/mcp_tools")
+async def delete_tool(name: str, x_admin_token: Optional[str] = Header(None)):
+    _require_admin(x_admin_token)
+    items = []
+    if TOOLS_FILE.exists():
+        items = json.loads(TOOLS_FILE.read_text("utf-8"))
+    items = [x for x in items if x.get("name") != name]
+    TOOLS_FILE.write_text(json.dumps(items, indent=2), "utf-8")
+    RELOAD_SENTINEL.write_text(str(time.time()), "utf-8")
+    return {"status":"ok","message":f"tool '{name}' removed; server will auto-reload"}
+```
+
+---
+
+## mcp\_server/main mounting with auth
+
+```python
+# (Already shown above); ensure you use MCPAuthASGI to protect /mcp
+```
+
+---
+
+## Cloudflare (optional) config file
+
+```yaml
+# cloudflared/config.yml (if not using TUNNEL_TOKEN)
+tunnel: <YOUR_TUNNEL_ID>
+credentials-file: /etc/cloudflared/<YOUR_TUNNEL_ID>.json
+
+ingress:
+  - hostname: mcp.example.com
+    service: http://app:8000
+  - hostname: gen-mcp.example.com
+    service: http://app:9000
+  - service: http_status:404
+```
+
+---
+
+## Claude Desktop MCP config (example)
+
+```json
+{
+  "mcpServers": {
+    "living-fastapi": {
+      "transport": "http",
+      "url": "https://mcp.example.com/mcp/",
+      "headers": {
+        "CF-Access-Client-Id": "<your-id>",
+        "CF-Access-Client-Secret": "<your-secret>",
+        "Authorization": "Bearer change-me-mcp"
+      }
+    },
+    "generated-api": {
+      "transport": "http",
+      "url": "https://gen-mcp.example.com/mcp/",
+      "headers": {
+        "CF-Access-Client-Id": "<your-id>",
+        "CF-Access-Client-Secret": "<your-secret>",
+        "Authorization": "Bearer change-me-mcp"
+      }
+    }
+  }
+}
+```
+
+---
+
+## README.md (quick start)
+
+```markdown
+### 1) Configure env
+cp .env.example .env
+# Fill ADMIN_TOKEN, MCP_TOKEN, CLAUDE_CLI_PATH, CLOUDFLARE_TUNNEL_TOKEN
+
+### 2) Build & run
+docker compose up -d --build
+
+### 3) Cloudflare Access
+Create Service Tokens for both hostnames and paste into Claude Desktop MCP headers.
+
+### 4) Test health
+curl -fsS http://app:8000/health        # from inside the appnet / container
+
+### 5) Use from Claude Desktop
+- Add both MCP servers with headers (see JSON snippet).
+- In the control-plane chat, type a brief, e.g.:
+  "Add POST /v1/summarize {text} returning 3 concise bullets (plain text)."
+- After the tool finishes, call tools from the generated API server.
+```

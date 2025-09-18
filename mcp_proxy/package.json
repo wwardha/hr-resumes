@@ -1,0 +1,14 @@
+{
+  "name": "hr-resumes-mcp-proxy",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Stdio-to-HTTP MCP proxy for Claude Desktop",
+  "bin": {
+    "hr-resumes-mcp-proxy": "proxy.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^0.6.0"
+  }
+}
+

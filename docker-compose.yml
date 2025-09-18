@@ -1,0 +1,42 @@
+networks:
+  hr_network:
+    # internal: true   # uncomment to block direct egress; keep off if you need pip installs
+
+services:
+  app:
+    build: .
+    container_name: hr-resumes-mcp
+    env_file: .env
+    environment:
+      - CLAUDE_CODE_URL=http://hr-resumes-claude:8300
+    expose:
+      - "8000"   # control-plane MCP (internal)
+      - "9000"   # generated API (+ MCP) (internal)
+    networks: [hr_network]
+    restart: unless-stopped
+
+  claude:
+    build:
+      context: .
+      args:
+        INSTALL_NODE_NANO: "true"
+    container_name: hr-resumes-claude
+    env_file: .env
+    command: uvicorn claude_code.service:app --host 0.0.0.0 --port 8300
+    expose:
+      - "8300"
+    networks: [hr_network]
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: hr-resumes-cloudflared
+    # Option A: token-based tunnel (recommended)
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    # Option B: config file instead of token
+    # volumes:
+    #   - ./cloudflared:/etc/cloudflared
+    networks: [hr_network]
+    restart: unless-stopped

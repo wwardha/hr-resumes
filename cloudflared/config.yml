@@ -1,0 +1,12 @@
+# cloudflared/config.yml (use when NOT using TUNNEL_TOKEN)
+tunnel: <YOUR_TUNNEL_ID>
+credentials-file: /etc/cloudflared/<YOUR_TUNNEL_ID>.json
+
+ingress:
+  - hostname: hr-resumes-api.wwardha.net
+    service: http://hr-resumes-mcp:9000
+  - hostname: hr-resumes-mcp.wwardha.net
+    service: http://hr-resumes-mcp:8000
+  - hostname: hr-resumes-cli.wwardha.net
+    service: http://hr-resumes-claude:8300
+  - service: http_status:404
