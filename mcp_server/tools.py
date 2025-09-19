@@ -12,7 +12,8 @@ from .settings import settings
 
 
 setup_logging()
-server = Server("living-fastapi-mcp")
+# Initialize FastMCP server with stateless_http=True for embedding
+server = Server("living-fastapi-mcp", stateless_http=True)
 
 
 def _headers():
