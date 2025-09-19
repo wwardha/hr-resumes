@@ -95,7 +95,6 @@ def _call_cli(prompt: str, system: Optional[str], max_tokens: int, temperature: 
         logger.info(f"System prompt added, total prompt length: {len(prompt)} chars")
     
     cmd = [
-        "sudo",
         CLAUDE_CLI_PATH,
         "-p",
         "--output-format",
@@ -394,7 +393,6 @@ def _call_cli_with_long_timeout(prompt: str, system: Optional[str], max_tokens: 
         logger.info(f"System prompt added, total prompt length: {len(prompt)} chars")
     
     cmd = [
-        "sudo",
         CLAUDE_CLI_PATH,
         "-p",
         "--output-format",
