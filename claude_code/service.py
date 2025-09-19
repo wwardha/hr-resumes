@@ -2,8 +2,11 @@ from fastapi import FastAPI, HTTPException, Body, Header
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional
 from pathlib import Path
-import json, os, subprocess, time, shlex
+import json, os, subprocess, time, shlex, logging
 
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 WORKSPACE = Path(os.getenv("WORKSPACE_DIR", "/workspace")).resolve()
 GENERATED = Path(os.getenv("GENERATED_DIR", "/workspace/generated_api")).resolve()
@@ -85,35 +88,121 @@ def _pip_install(pkgs: List[str]) -> str:
 
 
 def _call_cli(prompt: str, system: Optional[str], max_tokens: int, temperature: float) -> str:
+    logger.info(f"_call_cli called with max_tokens={max_tokens}, temperature={temperature}")
+    
     if system:
         prompt = f"[SYSTEM]\n{system}\n[/SYSTEM]\n\n{prompt}"
+        logger.info(f"System prompt added, total prompt length: {len(prompt)} chars")
+    
     cmd = [
         CLAUDE_CLI_PATH,
-        "-y",
         "-p",
         "--output-format",
         "json",
-        "--max-tokens",
-        str(max_tokens),
-        "--temperature",
-        str(temperature),
     ]
-    proc = subprocess.run(cmd, input=prompt, text=True, capture_output=True)
-    if proc.returncode != 0:
-        raise HTTPException(status_code=500, detail=f"claude CLI failed: {proc.stderr[-2000:]}")
-    out = (proc.stdout or "").strip()
+    
+    logger.info(f"Executing Claude CLI command: {' '.join(cmd)}")
+    logger.info(f"Input prompt preview: {prompt[:200]}..." if len(prompt) > 200 else f"Input prompt: {prompt}")
+    
     try:
-        data = json.loads(out)
-        text = (
-            data.get("text")
-            or data.get("output")
-            or data.get("content")
-            or data.get("message")
-            or data.get("completion")
+        # Use Popen for streaming to monitor progress in real-time
+        logger.info("Starting Claude CLI with streaming...")
+        proc = subprocess.Popen(
+            cmd, 
+            stdin=subprocess.PIPE, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,
+            text=True
         )
-        return (text or out).strip()
-    except Exception:
-        return out
+        
+        # Send input and close stdin
+        stdout_data, stderr_data = proc.communicate(input=prompt, timeout=120)
+        
+        logger.info(f"Claude CLI finished with return code: {proc.returncode}")
+        logger.info(f"stdout length: {len(stdout_data or '')} chars")
+        logger.info(f"stderr length: {len(stderr_data or '')} chars")
+        
+        if stdout_data:
+            logger.info(f"stdout preview: {(stdout_data[:500] + '...') if len(stdout_data) > 500 else stdout_data}")
+        if stderr_data:
+            logger.warning(f"stderr content: {stderr_data}")
+            
+        if proc.returncode != 0:
+            logger.error(f"Claude CLI failed with exit code {proc.returncode}")
+            logger.error(f"Full stderr: {stderr_data}")
+            raise HTTPException(status_code=500, detail=f"claude CLI failed: {stderr_data[-2000:] if stderr_data else 'Unknown error'}")
+        
+        # Set the output for further processing
+        proc.stdout = stdout_data
+        proc.stderr = stderr_data
+        
+        out = (proc.stdout or "").strip()
+        logger.info(f"Processing output, length: {len(out)} chars")
+        
+        try:
+            # Parse the outer wrapper JSON from Claude CLI
+            cli_response = json.loads(out)
+            logger.info(f"Successfully parsed CLI wrapper JSON, keys: {list(cli_response.keys()) if isinstance(cli_response, dict) else 'not dict'}")
+            
+            # Extract the actual result content
+            if isinstance(cli_response, dict) and "result" in cli_response:
+                result_content = cli_response["result"]
+                logger.info(f"Extracted result field, type: {type(result_content)}, length: {len(str(result_content))}")
+                
+                # If result is a string, try to parse it as JSON
+                if isinstance(result_content, str):
+                    try:
+                        # Strip markdown code fences if present
+                        cleaned_result = result_content.strip()
+                        if cleaned_result.startswith('```json\n'):
+                            cleaned_result = cleaned_result[8:]  # Remove ```json\n
+                        elif cleaned_result.startswith('```\n'):
+                            cleaned_result = cleaned_result[4:]  # Remove ```\n
+                        if cleaned_result.endswith('\n```'):
+                            cleaned_result = cleaned_result[:-4]  # Remove \n```
+                        elif cleaned_result.endswith('```'):
+                            cleaned_result = cleaned_result[:-3]  # Remove ```
+                        
+                        logger.info(f"Cleaned result for JSON parsing, length: {len(cleaned_result)}")
+                        data = json.loads(cleaned_result)
+                        logger.info(f"Successfully parsed result JSON, keys: {list(data.keys()) if isinstance(data, dict) else 'not dict'}")
+                    except json.JSONDecodeError as json_err:
+                        logger.warning(f"Result field is not valid JSON after cleaning: {json_err}")
+                        data = {"text": result_content}
+                else:
+                    # Result is already parsed JSON
+                    data = result_content
+                    logger.info(f"Result field is already parsed JSON")
+            else:
+                # Fallback to original parsing logic
+                logger.info("No 'result' field found, using original parsing logic")
+                data = cli_response
+                
+            # Extract text content from the parsed data
+            text = (
+                data.get("text")
+                or data.get("output") 
+                or data.get("content")
+                or data.get("message")
+                or data.get("completion")
+            )
+            
+            # If no text field found, return the entire data as JSON string
+            if text is None:
+                result = json.dumps(data, indent=2)
+                logger.info(f"No text field found, returning full JSON structure, length: {len(result)} chars")
+            else:
+                result = str(text).strip()
+                logger.info(f"Extracted text result, length: {len(result)} chars")
+                
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to parse JSON output: {str(e)}")
+            logger.info(f"Returning raw output instead")
+            return out
+    except Exception as e:
+        logger.error(f"Exception during Claude CLI execution: {str(e)}")
+        raise
 
 
 @app.get("/health")
@@ -152,41 +241,268 @@ async def apply_files(req: ApplyFilesReq, x_admin_token: Optional[str] = Header(
 @app.post("/generate")
 async def generate(req: GenerateReq, x_admin_token: Optional[str] = Header(None)):
     _require_admin(x_admin_token)
-    system = (
-        "You generate a working FastAPI project INSIDE an existing container.\n"
-        "Return ONLY JSON (no fences) with keys: packages, files, notes.\n"
-        "Main ASGI app at 'generated_api/app.py' exporting app = FastAPI().\n"
-        "Create all referenced modules. Include a /health route. Use env vars for secrets."
+    
+    # Step 1: Ask Claude to create a TODO list and return immediate feedback
+    logger.info("=== BRIEF TOOL STARTED ===")
+    logger.info("Step 1: Creating TODO list for the task")
+    
+    todo_system = (
+        "You are a project planner. Create a TODO list for building a FastAPI project.\n"
+        "Respond with ONLY a JSON object: {\"todos\": [\"task1\", \"task2\", \"task3\"]}\n"
+        "Keep tasks small and specific. Maximum 5 tasks.\n"
+        "Include: analyze requirements, create main app, add health endpoint, define packages."
     )
-    user = (
-        f"Build/modify a FastAPI app per this brief:\n{req.brief}\n"
-        f"Return files under /workspace (relative paths)."
-    )
-
-    text = _call_cli(user, system=system, max_tokens=4000, temperature=0.1)
+    todo_prompt = f"Create a TODO list for: {req.brief}\nReturn JSON with todos array."
+    
+    # Create TODO list with 15-minute timeout
     try:
-        plan = json.loads(text)
+        logger.info("🚀 Starting TODO list creation (15 min timeout)...")
+        todo_text = _call_cli_with_long_timeout(todo_prompt, system=todo_system, max_tokens=1000, temperature=0.1)
+        todo_data = json.loads(todo_text)
+        todos = todo_data.get("todos", [])
+        logger.info(f"✅ TODO list created successfully: {len(todos)} items")
+        logger.info(f"📋 TODO LIST: {todos}")
+        
+        # Log temporary result for client visibility
+        logger.info(f"🔄 TEMPORARY RESULT: Created {len(todos)} TODO items - Brief tool still processing...")
+        
     except Exception as e:
-        raise HTTPException(
-            status_code=500, detail=f"Model did not return valid JSON:\n{e}\n{text[:1200]}"
+        logger.error(f"❌ Failed to create TODO list: {e}")
+        todos = [
+            "Analyze the brief requirements",
+            "Create FastAPI app structure", 
+            "Add health endpoint",
+            "Define required packages",
+            "Generate final response"
+        ]
+        logger.info(f"📋 Using fallback TODO list: {len(todos)} items")
+    
+    # Step 2: Execute each TODO item with separate subprocess calls
+    results = {"packages": [], "files": {}, "notes": ""}
+    all_notes = []
+    
+    logger.info(f"🔄 STARTING TODO EXECUTION: {len(todos)} items to process")
+    
+    for i, todo in enumerate(todos, 1):
+        logger.info(f"=== TODO {i}/{len(todos)} STARTED ===")
+        logger.info(f"📝 Current task: {todo}")
+        
+        execution_system = (
+            "You are a code executor. Complete ONE specific task for a FastAPI project.\n"
+            "Respond with ONLY JSON: {\"packages\": [], \"files\": {\"path\": \"content\"}, \"notes\": \"what I did\"}\n"
+            "Be specific and focused. Complete only the requested task.\n"
+            "Main app must be at 'generated_api/app.py' if creating files.\n"
+            "Keep response concise and focused."
         )
-
-    packages = plan.get("packages", [])
-    files = {f["path"]: f["content"] for f in plan.get("files", [])}
-    if "generated_api/app.py" not in files:
-        raise HTTPException(status_code=400, detail="Output must include generated_api/app.py")
-
+        
+        execution_prompt = (
+            f"Complete this specific task: {todo}\n"
+            f"Project brief: {req.brief}\n"
+            f"Current progress: Completed {i-1}/{len(todos)} tasks\n"
+            f"Previous files: {list(results['files'].keys())}\n"
+            "Return JSON with your contribution."
+        )
+        
+        try:
+            logger.info(f"🚀 Starting TODO {i} execution (15 min timeout)...")
+            step_text = _call_cli_with_long_timeout(execution_prompt, system=execution_system, max_tokens=2000, temperature=0.1)
+            step_data = json.loads(step_text)
+            
+            # Merge results
+            step_packages = step_data.get("packages", [])
+            step_files = step_data.get("files", {})
+            step_notes = step_data.get("notes", "")
+            
+            # Add unique packages
+            for pkg in step_packages:
+                if pkg not in results["packages"]:
+                    results["packages"].append(pkg)
+            
+            # Add/update files
+            results["files"].update(step_files)
+            
+            # Collect notes
+            if step_notes:
+                all_notes.append(f"Step {i}: {step_notes}")
+            
+            logger.info(f"✅ TODO {i}/{len(todos)} COMPLETED")
+            logger.info(f"📦 Added {len(step_packages)} packages, {len(step_files)} files")
+            logger.info(f"🔄 TEMPORARY RESULT: Completed {i}/{len(todos)} TODOs - Brief tool still processing...")
+            
+        except Exception as e:
+            logger.error(f"❌ TODO {i}/{len(todos)} FAILED: {str(e)}")
+            all_notes.append(f"Step {i}: Failed - {str(e)}")
+            logger.info(f"🔄 TEMPORARY RESULT: TODO {i} failed, continuing with remaining {len(todos)-i} items...")
+    
+    # Step 3: Finalize and return complete result
+    logger.info("=== FINALIZING RESULTS ===")
+    results["notes"] = "; ".join(all_notes)
+    
+    if "generated_api/app.py" not in results["files"]:
+        logger.warning("No app.py generated, creating minimal one")
+        results["files"]["generated_api/app.py"] = (
+            "from fastapi import FastAPI\n\n"
+            "app = FastAPI()\n\n"
+            "@app.get('/health')\n"
+            "def health():\n"
+            "    return {'status': 'ok'}\n"
+        )
+        if "fastapi" not in results["packages"]:
+            results["packages"].append("fastapi")
+        if "uvicorn" not in results["packages"]:
+            results["packages"].append("uvicorn")
+    
+    # Handle file writing and response
+    packages = results["packages"]
+    files = results["files"]
+    
+    # Handle both file formats: dict or list of objects
+    files_data = files
+    if isinstance(files_data, dict):
+        files = files_data
+        logger.info(f"Files in dict format, {len(files)} files found")
+    elif isinstance(files_data, list):
+        files = {f["path"]: f["content"] for f in files_data}
+        logger.info(f"Files in list format, {len(files)} files found")
+    else:
+        files = {}
+        logger.warning(f"Unexpected files format: {type(files_data)}")
+    
     written = _write_files(files)
     pip_res = _pip_install(packages) if (req.install and packages) else ""
 
     (GENERATED / "__reload__.txt").write_text(str(time.time()), "utf-8")
 
-    res = {"written": written, "packages": packages, "notes": plan.get("notes", "")}
+    response = {"written": written, "packages": packages, "notes": results["notes"]}
     if req.return_plan:
-        res["plan"] = plan
+        response["plan"] = results
     if pip_res:
-        res["pip"] = pip_res
-    return res
+        response["pip"] = pip_res
+        
+    logger.info(f"✅ BRIEF TOOL COMPLETED: {len(todos)} TODO items processed")
+    logger.info("=== BRIEF TOOL FINISHED ===")
+    return response
+
+
+def _call_cli_with_long_timeout(prompt: str, system: Optional[str], max_tokens: int, temperature: float) -> str:
+    """Call CLI with 15-minute timeout for long-running tasks"""
+    logger.info(f"_call_cli_with_long_timeout called with max_tokens={max_tokens}, temperature={temperature}")
+    
+    if system:
+        prompt = f"[SYSTEM]\n{system}\n[/SYSTEM]\n\n{prompt}"
+        logger.info(f"System prompt added, total prompt length: {len(prompt)} chars")
+    
+    cmd = [
+        CLAUDE_CLI_PATH,
+        "-p",
+        "--output-format",
+        "json",
+    ]
+    
+    logger.info(f"Executing Claude CLI command: {' '.join(cmd)}")
+    logger.info(f"Input prompt preview: {prompt[:200]}..." if len(prompt) > 200 else f"Input prompt: {prompt}")
+    
+    try:
+        logger.info("Starting Claude CLI subprocess (15 minute timeout)...")
+        proc = subprocess.Popen(
+            cmd, 
+            stdin=subprocess.PIPE, 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE,
+            text=True
+        )
+        
+        # 15 minute timeout = 900 seconds
+        try:
+            stdout_data, stderr_data = proc.communicate(input=prompt, timeout=900)
+        except subprocess.TimeoutExpired:
+            logger.error("Claude CLI timed out after 15 minutes")
+            proc.kill()
+            raise HTTPException(status_code=500, detail="Claude CLI timed out after 15 minutes")
+        
+        logger.info(f"Claude CLI finished with return code: {proc.returncode}")
+        logger.info(f"stdout length: {len(stdout_data or '')} chars")
+        logger.info(f"stderr length: {len(stderr_data or '')} chars")
+        
+        if stdout_data:
+            logger.info(f"stdout preview: {(stdout_data[:500] + '...') if len(stdout_data) > 500 else stdout_data}")
+        if stderr_data:
+            logger.warning(f"stderr content: {stderr_data}")
+            
+        if proc.returncode != 0:
+            logger.error(f"Claude CLI failed with exit code {proc.returncode}")
+            logger.error(f"Full stderr: {stderr_data}")
+            raise HTTPException(status_code=500, detail=f"claude CLI failed: {stderr_data[-2000:] if stderr_data else 'Unknown error'}")
+        
+        # Process the output using existing parsing logic
+        out = (stdout_data or "").strip()
+        logger.info(f"Processing output, length: {len(out)} chars")
+        
+        try:
+            # Parse the outer wrapper JSON from Claude CLI
+            cli_response = json.loads(out)
+            logger.info(f"Successfully parsed CLI wrapper JSON, keys: {list(cli_response.keys()) if isinstance(cli_response, dict) else 'not dict'}")
+            
+            # Extract the actual result content
+            if isinstance(cli_response, dict) and "result" in cli_response:
+                result_content = cli_response["result"]
+                logger.info(f"Extracted result field, type: {type(result_content)}, length: {len(str(result_content))}")
+                
+                # If result is a string, try to parse it as JSON
+                if isinstance(result_content, str):
+                    try:
+                        # Strip markdown code fences if present
+                        cleaned_result = result_content.strip()
+                        if cleaned_result.startswith('```json\n'):
+                            cleaned_result = cleaned_result[8:]  # Remove ```json\n
+                        elif cleaned_result.startswith('```\n'):
+                            cleaned_result = cleaned_result[4:]  # Remove ```\n
+                        if cleaned_result.endswith('\n```'):
+                            cleaned_result = cleaned_result[:-4]  # Remove \n```
+                        elif cleaned_result.endswith('```'):
+                            cleaned_result = cleaned_result[:-3]  # Remove ```
+                        
+                        logger.info(f"Cleaned result for JSON parsing, length: {len(cleaned_result)}")
+                        data = json.loads(cleaned_result)
+                        logger.info(f"Successfully parsed result JSON, keys: {list(data.keys()) if isinstance(data, dict) else 'not dict'}")
+                    except json.JSONDecodeError as json_err:
+                        logger.warning(f"Result field is not valid JSON after cleaning: {json_err}")
+                        data = {"text": result_content}
+                else:
+                    # Result is already parsed JSON
+                    data = result_content
+                    logger.info(f"Result field is already parsed JSON")
+            else:
+                # Fallback to original parsing logic
+                logger.info("No 'result' field found, using original parsing logic")
+                data = cli_response
+                
+            # Extract text content from the parsed data
+            text = (
+                data.get("text")
+                or data.get("output") 
+                or data.get("content")
+                or data.get("message")
+                or data.get("completion")
+            )
+            
+            # If no text field found, return the entire data as JSON string
+            if text is None:
+                result = json.dumps(data, indent=2)
+                logger.info(f"No text field found, returning full JSON structure, length: {len(result)} chars")
+            else:
+                result = str(text).strip()
+                logger.info(f"Extracted text result, length: {len(result)} chars")
+                
+            return result
+        except Exception as e:
+            logger.warning(f"Failed to parse JSON output: {str(e)}")
+            logger.info(f"Returning raw output instead")
+            return out
+            
+    except Exception as e:
+        logger.error(f"Exception during Claude CLI execution: {str(e)}")
+        raise
 
 
 @app.post("/complete")
